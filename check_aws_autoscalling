@@ -1,0 +1,78 @@
+#!/usr/bin/python3
+import boto3 
+import json 
+import argparse
+import sys
+import arrow
+import os
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--filepath", "-f",  help="full path to credentials file", action='store', type=str, required=False, default="~/.aws/credentials")
+parser.add_argument("--profile", "-p", help="AWS Profile Name", action="store", required=False)
+parser.add_argument("--region", "-r",  help="AWS Region Name", action='store', required=False)
+parser.add_argument("--asg", "-g",  help="Name of Auto Scaling Group", action='store', required=True)
+parser.add_argument("--time", "-t",  help="minutes back from now", action='store', required=False, default=1, type=int )
+parser.add_argument("--failover", "-o", help="Failover to ASG", action='store', required=False, default=1,)
+parser.add_argument("--multiplier", "-m",  help="calculate how many instances of the fail-over ASG will be needed", action='store', required=False, default=1,)
+
+args = parser.parse_args()
+filepath = args.filepath
+credentials = args.profile
+region = args.region
+asg =  args.asg
+timeback = args.time
+failover = args.failover
+multiplier = args.multiplier 
+os.environ["AWS_SHARED_CREDENTIALS_FILE"] = filepath 
+
+session = boto3.Session(profile_name = credentials, region_name = region)
+client = session.client('autoscaling')
+response = client.describe_scaling_activities(
+    MaxRecords=1,  AutoScalingGroupName=asg
+)
+
+# y makes this into a python dict, that's below work
+y = json.dumps(response, default=str, indent=4)
+y = json.loads(y) 
+
+#FIRST search time - default 1 minute
+for i in y.get("Activities", "no activities found"):
+    ai = i["ActivityId"]
+    #asg = i["AutoScalingGroupName"]
+    cause = i.get('Cause', 'no Cause Given')
+    st = i["StartTime"]
+    sc = i["StatusCode"]
+    stp = arrow.get(st)
+    sm = i.get('StatusMessage', 'No Message Given') 
+    now = arrow.utcnow()
+    recently = now.shift(minutes = -timeback)
+    if recently < stp:
+        if  sc == "Successful":
+            print("OK: Autoscaling was", sc,"| AWS/AutoScaling.ScalingActivities=0;;;;")
+            sys.exit(0) 
+        elif sc == "Failed" or "Cancelled":
+            #FIND position of "increasing the capacity from"
+            position = cause.find('increasing the capacity from', 0, len(cause))
+            phrase = cause[position:]
+            period = phrase.find('.')
+            phrase = phrase[:period]
+            instances = [int(s) for s in phrase.split() if s.isdigit()]
+            print(instances)
+            available = instances[0]
+            desired = instances[1]
+            missing = (desired - available)
+            print("CRITICAL: AWS/AutoScaling.ScalingActivities is missing", missing, "| AWS/AutoScaling.ScalingActivities=", missing, ";;;;")
+            #print("present time is", now)
+            #print("Activity ID", ai)
+            #print(asg)
+            #print(missing, "instances missing at", st)
+            sys.exit(2)
+        else:
+            print("UNKNOWN: Something strange happened: Code", sc)  
+            sys.exit(3)
+    else:
+        print("OK: No activity found in", timeback, "minutes")
+        sys.exit(0)
+print("OK: No activity found at all| AWS/AutoScaling.ScalingActivities=0;;;;")
+sys.exit(0)
+
